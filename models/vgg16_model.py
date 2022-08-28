@@ -7,9 +7,9 @@ import os
 
 from pkg_resources import parse_version
 
-def define_Vgg19(opt):
+def define_Vgg16(opt):
     use_gpu = len(opt.gpu_ids) > 0
-    vgg19net = vgg19(models.vgg19(pretrained=True), opt)
+    vgg19net = vgg16(models.vgg16(pretrained=True), opt)
 
     if use_gpu:
         assert(torch.cuda.is_available())
@@ -18,9 +18,9 @@ def define_Vgg19(opt):
 
 
 
-class vgg19(nn.Module):
+class vgg16(nn.Module):
     def __init__(self, basic_model, opt):
-        super(vgg19, self).__init__()
+        super(vgg16, self).__init__()
         self.layer_1 = self.make_layers(basic_model,0,2)
         self.layer_2 = self.make_layers(basic_model,2,7)
         self.layer_3 = self.make_layers(basic_model,7,12)

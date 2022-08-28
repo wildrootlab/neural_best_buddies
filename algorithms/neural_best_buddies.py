@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import math
 import torch
@@ -21,7 +22,7 @@ class sparse_semantic_correspondence():
         self.k_per_level = k_per_level
         self.k_final = k_final
         self.patch_size_list = [[5,5],[5,5],[3,3],[3,3],[3,3]]
-        self.search_box_radius_list = [3,3,2,2,2]
+        self.search_box_radius_list = [3,3,2,1,1]
         self.draw_radius = [2,2,2,4,8]
         self.pad_mode = 'reflect'
         self.L_final = 2 if fast else 1
@@ -63,6 +64,7 @@ class sparse_semantic_correspondence():
 
         return closest_patch_index
 
+    
     def warp(self, A_size, B, patch_size, mapping):
         assert(B.size() == A_size)
         [dx,dy] = [math.floor(patch_size[0]/2), math.floor(patch_size[1]/2)]
@@ -111,14 +113,14 @@ class sparse_semantic_correspondence():
             identity_map_original = self.identity_map(original_image_size)
             factor = int(math.pow(2,level-1))
             return identity_map_original + self.upsample_mapping(mapping - identity_map_L,factor = factor)
-
+    
     def upsample_mapping(self, mapping, factor = 2):
         upsampler = torch.nn.Upsample(scale_factor=factor, mode='nearest')
         return upsampler(Variable(factor*mapping)).data
 
     def get_M(self, F, tau=0.05):
         assert(F.dim() == 4)
-        F_squared_sum = F.pow(2).sum(1,keepdim=True).expand_as(F)
+        F_squared_sum = F.pow(2).sum(1, keepdim=True).expand_as(F)
         F_normalized = self.normalize_0_to_1(F_squared_sum)
         M = self.Tensor(F_normalized.size())
         M.copy_(torch.ge(F_normalized,tau))
@@ -130,9 +132,12 @@ class sparse_semantic_correspondence():
         idnty_map[0,1,:,:].copy_(torch.arange(0,size[3]).repeat(size[2],1))
         return idnty_map
 
+    # @torch.jit.script
     def spatial_distance(self, point_A, point_B):
         return math.pow((point_A - point_B).pow(2).sum(),0.5)
 
+
+    @jit(parallel = True, forceobj=True)
     def find_neural_best_buddies(self, correspondence, F_A, F_Am, F_Bm, F_B, patch_size, initial_map_a_to_b, initial_map_b_to_a, search_box_radius, tau, top, deepest_level=False):
         assert(F_A.size() == F_Bm.size())
         assert(F_Am.size() == F_B.size())
@@ -151,10 +156,16 @@ class sparse_semantic_correspondence():
                 [top_left_1, bottom_right_1] = self.extract_receptive_field(correspondence[0][i][0], correspondence[0][i][1], search_box_radius, [a_to_b.size(2), a_to_b.size(3)])
                 [top_left_2, bottom_right_2] = self.extract_receptive_field(correspondence[1][i][0], correspondence[1][i][1], search_box_radius, [a_to_b.size(2), a_to_b.size(3)])
                 refined_correspondence_i = self.find_best_buddies(a_to_b, b_to_a, top_left_1, bottom_right_1, top_left_2, bottom_right_2)
+
                 refined_correspondence_i = self.calculate_activations(refined_correspondence_i, F_A, F_B)
                 refined_correspondence = self.replace_refined_correspondence(refined_correspondence, refined_correspondence_i, i)
 
+        # print(refined_correspondence)
+        
         return [refined_correspondence, a_to_b, b_to_a]
+
+
+
 
     def find_best_buddies(self, a_to_b, b_to_a, top_left_1 = [0,0], bottom_right_1 = [float('inf'), float('inf')], top_left_2 = [0,0], bottom_right_2 = [float('inf'), float('inf')]):
         assert(a_to_b.size() == b_to_a.size())
@@ -164,12 +175,13 @@ class sparse_semantic_correspondence():
         for i in range(top_left_1[0], min(bottom_right_1[0],a_to_b.size(2))):
             for j in range(top_left_1[1], min(bottom_right_1[1],a_to_b.size(3))):
                 map_ij = a_to_b[0,:,i,j].cpu().numpy() #Should be improved (slow in cuda)
-                d = self.spatial_distance(b_to_a[0,:,int(map_ij[0]),int(map_ij[1])],self.Tensor([i,j]))
+                d = self.spatial_distance(b_to_a[0,:,int(map_ij[0]),int(map_ij[1])], self.Tensor([i,j]))
                 if d == 0:
                     if int(map_ij[0]) >= top_left_2[0] and int(map_ij[1]) >= top_left_2[1] and int(map_ij[0]) < bottom_right_2[0] and int(map_ij[1]) < bottom_right_2[1]:
                         correspondence[0].append([i,j])
                         correspondence[1].append([int(map_ij[0]), int(map_ij[1])])
                         number_of_cycle_consistencies += 1
+
         return correspondence
 
     def extract_receptive_field(self, x, y, radius, width):
@@ -185,6 +197,8 @@ class sparse_semantic_correspondence():
         new_correspondence[1].pop(index)
         new_correspondence[2].pop(index)
 
+        # print(refined_correspondence_i[0])
+
         for j in range(len(refined_correspondence_i[0])):
             new_correspondence[0].append(refined_correspondence_i[0][j])
             new_correspondence[1].append(refined_correspondence_i[1][j])
@@ -195,7 +209,7 @@ class sparse_semantic_correspondence():
     def calculate_activations(self, correspondence, F_A, F_B):
         response_A = FM.stretch_tensor_0_to_1(FM.response(F_A))
         response_B = FM.stretch_tensor_0_to_1(FM.response(F_B))
-        correspondence_avg_response = self.Tensor(len(correspondence[0])).fill_(0)
+        # correspondence_avg_response = self.Tensor(len(correspondence[0])).fill_(0)
         response_correspondence = correspondence
         response_correspondence.append([])
         for i in range(len(correspondence[0])):
@@ -203,6 +217,9 @@ class sparse_semantic_correspondence():
             response_B_i = response_B[0,0,correspondence[1][i][0],correspondence[1][i][1]]
             correspondence_avg_response_i = (response_A_i + response_B_i)*0.5
             response_correspondence[2].append(correspondence_avg_response_i)
+
+        
+
         return response_correspondence
 
     def limit_correspondence_number_per_level(self, correspondence, F_A, F_B, tau, top=5):
@@ -221,6 +238,7 @@ class sparse_semantic_correspondence():
 
         return top_response_correspondence
 
+    # #@jit(nopython=True)
     def threshold_response_correspondence(self, correspondence, F_A, F_B, th):
         M_A = self.get_M(F_A, tau=th)
         M_Bt = self.get_M(F_B, tau=th)
@@ -235,6 +253,7 @@ class sparse_semantic_correspondence():
 
         return high_correspondence
 
+    
     def make_correspondence_unique(self, correspondence):
         unique_correspondence = correspondence
         for i in range(len(unique_correspondence[0])-1,-1,-1):
@@ -302,6 +321,20 @@ class sparse_semantic_correspondence():
             for i in range(len(points)):
                 opt_file.write('%i, %i\n' % (points[i][0], points[i][1]))
 
+
+    dist_score = 1
+    reponse_score = 1
+
+    def attractive_score(self, correspondence_i, correspondence_R_4_i, label_center):
+        '''
+        Scoring mechanism to balance if distance or neural response override
+        '''
+
+        dist = np.linalg.norm([correspondence_R_4_i - label_center])
+        return (self.dist_score * dist if (dist < 5*np.sqrt(2)/2) else 0) - self.reponse_score*correspondence_i[2]
+
+
+
     def top_k_in_clusters(self, correspondence, k):
         if k > len(correspondence[0]):
             return correspondence
@@ -313,16 +346,39 @@ class sparse_semantic_correspondence():
         top_cluster_correspondence = [[],[],[]]
         print("Calculating K-means...")
         kmeans = KMeans(n_clusters=k, random_state=0).fit(correspondence_R_4)
-        for i in range(k):
-            max_response = 0
-            max_response_index = len(correspondence[0])
-            for j in range(len(correspondence[0])):
-                if kmeans.labels_[j]==i and correspondence[2][j]>max_response:
-                    max_response = correspondence[2][j]
-                    max_response_index = j
-            top_cluster_correspondence[0].append(correspondence[0][max_response_index])
-            top_cluster_correspondence[1].append(correspondence[1][max_response_index])
-            top_cluster_correspondence[2].append(correspondence[2][max_response_index])
+
+        # find point closes to center
+        correspondence_R_4 = np.array(correspondence_R_4)
+        for label_t in range(0, k):
+            pointsIndx = np.where(kmeans.labels_ == label_t)[0]
+
+            # check points for which closer to center
+            closest_to_cluster_center = None
+            dist = math.inf
+            center = kmeans.cluster_centers_[label_t]
+
+            for p in pointsIndx:
+                dist_test = self.attractive_score([correspondence[0][p],correspondence[1][p],correspondence[2][p]] ,correspondence_R_4[p], center)
+                if  dist_test < dist:
+                    closest_to_cluster_center = [correspondence[0][p],correspondence[1][p],correspondence[2][p]]
+                    dist = dist_test
+        
+            top_cluster_correspondence[0] += [closest_to_cluster_center[0]]
+            top_cluster_correspondence[1] += [closest_to_cluster_center[1]]
+            top_cluster_correspondence[2] += [closest_to_cluster_center[2]]
+
+        # print(top_cluster_correspondence)
+
+        # for i in range(k):
+        #     max_response = 0
+        #     max_response_index = len(correspondence[0])
+        #     for j in range(len(correspondence[0])):
+        #         if kmeans.labels_[j]==i and correspondence[2][j]>max_response:
+        #             max_response = correspondence[2][j]
+        #             max_response_index = j
+        #     top_cluster_correspondence[0].append(correspondence[0][max_response_index])
+        #     top_cluster_correspondence[1].append(correspondence[1][max_response_index])
+        #     top_cluster_correspondence[2].append(correspondence[2][max_response_index])
 
         return top_cluster_correspondence
 
@@ -335,6 +391,7 @@ class sparse_semantic_correspondence():
 
         return mid_correspondence
 
+    # @jit(parallel = True, forceobj=True)
     def transfer_style_local(self, F_A, F_B, patch_size, image_width, mapping_a_to_b, mapping_b_to_a, L):
         F_B_warped = self.warp(F_A.size(), F_B, patch_size, mapping_a_to_b)
         F_A_warped = self.warp(F_B.size(), F_A, patch_size, mapping_b_to_a)
@@ -359,6 +416,7 @@ class sparse_semantic_correspondence():
         print("No. of correspondence: ", len(scaled_correspondence[0]))
         return scaled_correspondence
 
+    
     def run(self, A, B):
         assert(A.size() == B.size())
         image_width = A.size(3)
@@ -369,6 +427,7 @@ class sparse_semantic_correspondence():
         self.A = self.Tensor(A.size()).copy_(A)
         self.B = self.Tensor(B.size()).copy_(B)
         print("Starting algorithm...")
+        
         L_start = 5
 
         self.model.set_input(self.A)
@@ -394,7 +453,10 @@ class sparse_semantic_correspondence():
                 deepest_level = False
 
             print("Finding best-buddies for the " + str(L) + "-th level")
+            start = datetime.now()
             [correspondence, mapping_a_to_b, mapping_b_to_a] = self.find_neural_best_buddies(correspondence, F_A, F_Am, F_Bm, F_B, patch_size, initial_map_a_to_b, initial_map_b_to_a, search_box_radius, self.tau, self.k_per_level, deepest_level)
+            print(f"find_neural_best_buddies Done! {(datetime.now() - start).total_seconds()}")
+
             correspondence = self.threshold_response_correspondence(correspondence, F_A, F_B, self.tau)
             if self.k_per_level < float('inf'):
                 correspondence = self.top_k_in_clusters(correspondence, int(self.k_per_level))
@@ -404,8 +466,12 @@ class sparse_semantic_correspondence():
                 print("Drawing correspondence...")
                 scaled_correspondence = self.scale_correspondence(correspondence, L)
                 draw.draw_correspondence(self.A, self.B, scaled_correspondence, draw_radius, self.save_dir, L)
-
+            
+            start = datetime.now()
+            print("Style Transfer....")
             [F_A, F_B, F_Am, F_Bm, initial_map_a_to_b, initial_map_b_to_a] = self.transfer_style_local(F_A, F_B, patch_size, image_width, mapping_a_to_b, mapping_b_to_a, L)
+            print(f"Style Transfer Done! {(datetime.now() - start).total_seconds()}")
+
 
         filtered_correspondence = self.finalize_correspondence(correspondence, image_width, self.L_final)
         draw.draw_correspondence(self.A, self.B, filtered_correspondence, self.draw_radius[self.L_final-1], self.save_dir)

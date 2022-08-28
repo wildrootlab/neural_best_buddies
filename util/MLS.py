@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from PIL import Image
+import cv2
+
 
 def read_points(filename):
     points = []
@@ -188,3 +190,8 @@ class MLS():
         plt.imsave('%s/warp_AtoM.png' % root_folder, warp_AtoM)
         np.save('%s/BtoA.npy' % root_folder, vxy_BtoA)
         plt.imsave('%s/warp_BtoM.png' % root_folder, warp_BtoM)
+        plt.imsave('%s/warp_BtoA.png' % root_folder, warp_BtoA)
+
+
+        new_img = Image.blend(Image.fromarray(warp_AtoM), Image.fromarray(warp_BtoM), 0.5)
+        new_img.save('%s/warp_BtoA.png' % root_folder,"PNG")
