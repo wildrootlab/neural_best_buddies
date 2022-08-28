@@ -2,7 +2,7 @@
 batchSize: 1
 beta1: 0.5
 border_size: 7
-convergence_threshold: 0.01
+convergence_threshold: 0.05
 datarootA: ./images/Atlas.png
 datarootB: ./images/TestBrainSection2.png
 fast: True
@@ -11,7 +11,7 @@ gpu_ids: []
 imageSize: 224
 input_nc: 3
 k_final: 50
-k_per_level: 100.0
+k_per_level: 60.0
 lr: 0.05
 name: brain
 niter_decay: 100
